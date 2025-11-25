@@ -1,4 +1,4 @@
-import { GoogleGenAI, LiveServerMessage, Modality } from '@google/genai';
+import { GoogleGenAI, LiveServerMessage, Modality, FunctionDeclaration, Type } from '@google/genai';
 import { ConnectionState } from '../types';
 import { createPcmBlob, decodeAudioData, base64ToUint8Array } from '../utils/audioUtils';
 
@@ -6,6 +6,48 @@ import { createPcmBlob, decodeAudioData, base64ToUint8Array } from '../utils/aud
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
 const BUFFER_SIZE = 4096;
+
+// --- Tool Definitions ---
+const tools: FunctionDeclaration[] = [
+  {
+    name: "addToCart",
+    description: "Add a specific product to the shopping cart. Use this when the user wants to buy something.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        productName: {
+          type: Type.STRING,
+          description: "The name of the product to add (e.g., 'Cyber Sneakers', 'Holo Watch')."
+        }
+      },
+      required: ["productName"]
+    }
+  },
+  {
+    name: "openCart",
+    description: "Open or view the shopping cart sidebar.",
+    parameters: { type: Type.OBJECT, properties: {} }
+  },
+  {
+    name: "checkout",
+    description: "Proceed to checkout and complete the purchase.",
+    parameters: { type: Type.OBJECT, properties: {} }
+  },
+  {
+    name: "changeBackgroundColor",
+    description: "Change the background theme of the website.",
+    parameters: {
+      type: Type.OBJECT,
+      properties: {
+        color: {
+           type: Type.STRING,
+           description: "The color theme (e.g., 'red', 'blue', 'green', 'purple')."
+        }
+      },
+      required: ["color"]
+    }
+  }
+];
 
 export class GeminiLiveService {
   private ai: GoogleGenAI;
@@ -28,14 +70,17 @@ export class GeminiLiveService {
   
   public onStateChange: (state: ConnectionState) => void;
   public onError: (error: string) => void;
+  public onToolCall: (name: string, args: any) => Promise<any>;
 
   constructor(
     onStateChange: (state: ConnectionState) => void, 
-    onError: (error: string) => void
+    onError: (error: string) => void,
+    onToolCall: (name: string, args: any) => Promise<any>
   ) {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     this.onStateChange = onStateChange;
     this.onError = onError;
+    this.onToolCall = onToolCall;
   }
 
   toggleMute(mute: boolean) {
@@ -78,7 +123,16 @@ export class GeminiLiveService {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
-          systemInstruction: "You are a highly intelligent AI assistant connected via a direct voice line. Act like a helpful, conversational friend on the phone. Keep responses concise.",
+          // We add the tools here
+          tools: [{ functionDeclarations: tools }],
+          systemInstruction: `
+            You are "Nova", an advanced AI assistant for the 'CyberStore' website. 
+            You can control the website interface directly.
+            Available products: 'Cyber Sneakers' ($150), 'Holo Watch' ($299), 'Neon Jacket' ($120).
+            If the user asks to buy something, use the 'addToCart' tool immediately.
+            If they want to pay, use 'checkout'.
+            Keep responses short, cool, and professional. 
+          `,
         },
         callbacks: {
           onopen: () => {
@@ -86,7 +140,7 @@ export class GeminiLiveService {
             this.setupAudioInput(stream, sessionPromise);
           },
           onmessage: async (message: LiveServerMessage) => {
-            await this.handleServerMessage(message);
+            await this.handleServerMessage(message, sessionPromise);
           },
           onclose: () => {
             this.onStateChange(ConnectionState.DISCONNECTED);
@@ -132,11 +186,11 @@ export class GeminiLiveService {
     this.processor.connect(this.inputAudioContext.destination);
   }
 
-  private async handleServerMessage(message: LiveServerMessage) {
+  private async handleServerMessage(message: LiveServerMessage, sessionPromise: Promise<any>) {
+    // 1. Handle Audio
     const base64Audio = message.serverContent?.modelTurn?.parts[0]?.inlineData?.data;
     
     if (base64Audio && this.outputAudioContext && this.outputNode) {
-      // Decode audio
       const audioBytes = base64ToUint8Array(base64Audio);
       const audioBuffer = await decodeAudioData(
         audioBytes, 
@@ -145,13 +199,11 @@ export class GeminiLiveService {
         1
       );
 
-      // Handle timing
       this.nextStartTime = Math.max(this.nextStartTime, this.outputAudioContext.currentTime);
       
       const source = this.outputAudioContext.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(this.outputNode);
-      
       source.addEventListener('ended', () => {
         this.activeSources.delete(source);
       });
@@ -161,6 +213,31 @@ export class GeminiLiveService {
       this.activeSources.add(source);
     }
 
+    // 2. Handle Tool Calls (Function Calling)
+    if (message.toolCall) {
+        console.log("Tool call received:", message.toolCall);
+        for (const fc of message.toolCall.functionCalls) {
+            try {
+                // Execute client-side function
+                const result = await this.onToolCall(fc.name, fc.args);
+                
+                // Send response back to Gemini
+                sessionPromise.then((session) => {
+                    session.sendToolResponse({
+                        functionResponses: [{
+                            id: fc.id,
+                            name: fc.name,
+                            response: { result: result }
+                        }]
+                    });
+                });
+            } catch (error) {
+                console.error("Tool execution failed:", error);
+            }
+        }
+    }
+
+    // 3. Handle Interruption
     const interrupted = message.serverContent?.interrupted;
     if (interrupted) {
       this.stopAllAudio();
