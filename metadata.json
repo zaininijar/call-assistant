@@ -1,0 +1,7 @@
+{
+  "name": "Copy of Gemini Live Sphere",
+  "description": "An immersive 3D AI calling experience powered by Gemini Live API and Three.js.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
