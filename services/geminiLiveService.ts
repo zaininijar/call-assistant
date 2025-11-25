@@ -21,7 +21,10 @@ export class GeminiLiveService {
 
   private nextStartTime = 0;
   private activeSources = new Set<AudioBufferSourceNode>();
-  private session: any = null; // Using any for the session object type from SDK
+  private session: any = null;
+  
+  // State
+  public isMuted: boolean = false;
   
   public onStateChange: (state: ConnectionState) => void;
   public onError: (error: string) => void;
@@ -33,6 +36,10 @@ export class GeminiLiveService {
     this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
     this.onStateChange = onStateChange;
     this.onError = onError;
+  }
+
+  toggleMute(mute: boolean) {
+    this.isMuted = mute;
   }
 
   async connect() {
@@ -71,7 +78,7 @@ export class GeminiLiveService {
           speechConfig: {
             voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
           },
-          systemInstruction: "You are a helpful, witty, and futuristic AI assistant residing in a digital sphere. Keep your responses concise and engaging.",
+          systemInstruction: "You are a highly intelligent AI assistant connected via a direct voice line. Act like a helpful, conversational friend on the phone. Keep responses concise.",
         },
         callbacks: {
           onopen: () => {
@@ -86,7 +93,7 @@ export class GeminiLiveService {
           },
           onerror: (e) => {
             console.error('Gemini Live Error:', e);
-            this.onError("Connection error occurred.");
+            this.onError("Connection lost.");
             this.disconnect();
           }
         }
@@ -106,11 +113,13 @@ export class GeminiLiveService {
     if (!this.inputAudioContext) return;
 
     this.inputSource = this.inputAudioContext.createMediaStreamSource(stream);
-    this.inputSource.connect(this.inputAnalyser!); // Connect to visualiser
+    this.inputSource.connect(this.inputAnalyser!); 
 
     this.processor = this.inputAudioContext.createScriptProcessor(BUFFER_SIZE, 1, 1);
     
     this.processor.onaudioprocess = (e) => {
+      if (this.isMuted) return; // Don't send data if muted
+
       const inputData = e.inputBuffer.getChannelData(0);
       const pcmBlob = createPcmBlob(inputData);
       
@@ -170,10 +179,6 @@ export class GeminiLiveService {
     this.stopAllAudio();
 
     if (this.session) {
-        // There isn't a direct close on the promise wrapper, but normally we'd close the socket.
-        // The SDK handles cleanup mostly on object disposal or we can trigger a close if exposed.
-        // Assuming session.close() exists on the resolved session object if needed, 
-        // but often disconnecting the input stream is enough to stop logic.
         this.session.then((s: any) => {
             if(s.close) s.close();
         }).catch(() => {});
